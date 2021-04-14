@@ -1,0 +1,166 @@
+---
+title: "Project 3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(RSocrata)
+library(ggplot2)
+library(dplyr)
+ny_token <- "sSRF5mCb1G6VMJqxXP5FSOdQB"
+pword <- "3106pass!"
+email_add <- "charles.dominick.baird@gmail.com"
+```
+
+
+
+```{r}
+crashes.data <- read.socrata(
+  paste("https://data.cityofnewyork.us/resource/h9gi-nx95.json?",
+        "$where=zip_code in ('10115', '10025', '10026', '10027')", sep=""),
+  app_token = ny_token,
+  email     = email_add,
+  password  = pword
+)
+```
+
+```{r}
+crashes.data[, c(5:8,10:17)] <- sapply(crashes.data[, c(5:8,10:17)], as.numeric)
+
+# Create feature that just extracts the hour
+crashes.data$hour <- sub("\\:.*", "", crashes.data$crash_time)
+
+crashes.data$dayofweek <- as.POSIXlt(crashes.data$crash_date)$wday
+
+crashes.columbia <- crashes.data[!is.na(crashes.data$latitude),]
+
+# Define Columbia Parking as south of Grant's Tomb and
+# west of intersection of Amsterdam and 123rd
+# north of Hungarian
+crashes.columbia <- crashes.columbia[with(data=crashes.columbia, latitude < 40.811 &
+                                            latitude > 40.8036 &
+                                            longitude < -73.9579 &
+                                            longitude > -73.9684),]
+
+campus <- data.frame("lat" = c(40.806677, 40.805578, 40.80936, 40.810468, 40.810746,
+                               40.810048, 40.805565, 40.8036, 40.8036, 40.805744),
+                     "long" = c(-73.96461, -73.961984, -73.95928, -73.962, -73.9568,
+                                -73.955, -73.958426, -73.958265, -73.960454, -73.959725),
+                     "group" = factor(c(rep(1,4), rep(2,6))),
+                     "piece" = factor(c(rep(1,4), rep(2,6))),
+                     "id" = c(rep("wholecampus", 4), rep("morningsidepark", 6)),
+                     "hole" = c(rep(F,4), rep(F,6)), "order" = seq(10))
+```
+
+```{r}
+# Normalize lat/lon and add features
+crash_mat <- data.matrix(crashes.columbia[,c("latitude", "longitude",
+                                             "number_of_pedestrians_injured",
+                                             "number_of_motorist_injured",
+                                             "number_of_persons_killed", "hour")])
+
+# Standardize coordinates, bottom of campus will be about 0, 0
+for(i in seq(2)){
+  crash_mat[,i] <- scale(crash_mat[,i])
+}
+
+# Normalize injuries
+for(i in (seq(2)+2)){
+  crash_mat[,i] <- (crash_mat[,i] - min(crash_mat[,i]))/(max(crash_mat[,i]) - min(crash_mat[,i]))
+}
+
+crash_mat[,5] <- crash_mat[,5]
+
+# -1 is hours 22 - 6 (Many parking rules suspended)
+# 0 is hours 6 - 14 (Work rush hour and street sweeping hours)
+# 1 is hours 14 - 22
+
+timeofday <- numeric(length = length(crashes.columbia$hour))
+timeofday[(as.numeric(crashes.columbia$hour) > 21 | as.numeric(crashes.columbia$hour) < 7)] <- -1
+timeofday[(as.numeric(crashes.columbia$hour) < 23 & as.numeric(crashes.columbia$hour) < 13)] <- 1
+
+crash_mat[,6] <- timeofday
+
+k_max <- 20
+out <- matrix(NA, ncol=2, nrow=k_max)
+for(k in seq_len(k_max)){
+    km_out <- kmeans(crash_mat, k)
+    out[k, 1] <- km_out$betweenss
+    out[k, 2] <- km_out$tot.withinss
+}
+
+plot(sort(out[,1]/out[, 2]), type="b")
+```
+
+If there appears to be a good jump, it won't be in the same spot when you rerun it. Let's try with six anyways. Plus signs are centroids.
+
+```{r}
+km_out <- kmeans(crash_mat, 6)
+
+p0 <- ggplot(crashes.columbia, aes(x=longitude, y=latitude)) +
+  geom_polygon(color = "gray90", data=campus,
+               mapping = aes(x = long, y = lat, group = group),
+               inherit.aes = F) + geom_point(aes(size=number_of_persons_injured,
+                                                 color=as.factor(km_out$cluster)), shape=1) +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+
+collat <- crashes.columbia$latitude
+collon <- crashes.columbia$longitude
+
+p1 <- p0 + geom_point(shape = 3, data=data.frame(long=(km_out$centers[,2]*sd(collon) + mean(collon)), lat=(km_out$centers[,1]*sd(collat) + mean(collat))), mapping = aes(x = long, y = lat, color=levels(as.factor(km_out$cluster))), inherit.aes = F)
+
+p1
+```
+
+
+```{r}
+table(km_out$cluster)
+
+km_out$centers
+```
+
+```{r}
+tixurls <- c("https://data.cityofnewyork.us/resource/jt7v-77mi.json?",
+             "https://data.cityofnewyork.us/resource/c284-tqph.json?",
+             "https://data.cityofnewyork.us/resource/kiv2-tbus.json?",
+             "https://data.cityofnewyork.us/resource/2bnn-yakx.json?",
+             "https://data.cityofnewyork.us/resource/a5td-mswe.json?",
+             "https://data.cityofnewyork.us/resource/faiq-9dfq.json?",
+             "https://data.cityofnewyork.us/resource/p7t3-5i9s.json?")
+
+tickets.data <- lapply(tixurls, function(x){
+  dat <- read.socrata(
+  paste(x, "$where=street_name in('CLAREMONT', 'MORNINGSIDE') or ",
+        "intersecting_street in('CLAREMONT', 'MORNINGSIDE')", sep=""),
+  app_token = ny_token,
+  email     = email_add,
+  password  = pword)
+  return (dat[,c("summons_number", "issue_date", "violation_time",
+                 "violation_code", "street_name", "intersecting_street")])
+  })
+
+bound <- bind_rows(tickets.data, .id = "year_batch")
+```
+
+```{r}
+tickets_df <- bound
+# Get just hour and day of week
+tickets_df$hour <- as.numeric(substr(tickets_df$violation_time, 1, 2))
+
+tickets_df$hour <- ((substr(tickets_df$violation_time, 5, 5) == 'P')*12 + tickets_df$hour)
+
+tickets_df$issue_date <- as.POSIXlt(tickets_df$issue_date)$wday
+# Label 1 or 2 for Claremont side or Morningside
+tickets_df$side <- 2
+tickets_df$side[tickets_df$street_name == "CLAREMONT"] <- 1
+tickets_df$side[tickets_df$intersecting_street == "CLAREMONT"] <- 1
+```
+
+```{r}
+barplot(table(tickets_df$hour[tickets_df$side == 1]))
+barplot(table(tickets_df$hour[tickets_df$side == 2]))
+
+barplot(table(tickets_df$issue_date[tickets_df$side == 1]))
+barplot(table(tickets_df$issue_date[tickets_df$side == 2]))
+```
