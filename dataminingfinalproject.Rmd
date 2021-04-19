@@ -1,0 +1,351 @@
+---
+title: "Project 3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(RSocrata)
+library(ggplot2)
+library(dplyr)
+library(NbClust)
+library(factoextra)
+
+
+ny_token <- "sSRF5mCb1G6VMJqxXP5FSOdQB"
+pword <- "3106pass!"
+email_add <- "charles.dominick.baird@gmail.com"
+```
+
+
+
+```{r}
+crashes.data <- read.socrata(
+  paste("https://data.cityofnewyork.us/resource/h9gi-nx95.json?",
+        "$where=zip_code in ('10115', '10025', '10026', '10027')", sep=""),
+  app_token = ny_token,
+  email     = email_add,
+  password  = pword
+)
+```
+
+```{r}
+crashes.data[, c(5:8,10:17)] <- sapply(crashes.data[, c(5:8,10:17)], as.numeric)
+
+# Create feature that just extracts the hour
+crashes.data$hour <- sub("\\:.*", "", crashes.data$crash_time)
+
+crashes.data$dayofweek <- as.POSIXlt(crashes.data$crash_date)$wday
+
+crashes.columbia <- crashes.data[!is.na(crashes.data$latitude),]
+
+# Define Columbia Parking as south of Grant's Tomb and
+# west of intersection of Amsterdam and 123rd
+# north of Hungarian
+crashes.columbia <- crashes.columbia[with(data=crashes.columbia, latitude < 40.811 &
+                                            latitude > 40.8036 &
+                                            longitude < -73.9579 &
+                                            longitude > -73.9684),]
+
+campus <- data.frame("lat" = c(40.806677, 40.805578, 40.80936, 40.810468, 40.810746,
+                               40.810048, 40.805565, 40.8036, 40.8036, 40.805744,
+                               40.811325, 40.811075, 40.803375, 40.803625,
+                               40.811075, 40.811325, 40.803525, 40.803275,
+                               40.80865, 40.80895, 40.806250, 40.80595,
+                               40.8119, 40.81165, 40.808315, 40.808565),
+                     "long" = c(-73.96461, -73.961984, -73.95928, -73.962, -73.9568,
+                                -73.955, -73.958426, -73.958265, -73.960454, -73.959725,
+                                -73.9616, -73.9616, -73.96716, -73.96715,
+                                -73.958, -73.958, -73.9636, -73.9636,
+                                -73.9658, -73.9658, -73.95935, -73.95935,
+                                -73.96247, -73.96247, -73.96489, -73.96489),
+                     "group" = factor(c(rep(1,4), rep(2,6), rep(3,4), rep(4,4), rep(5,4), rep(6,4))),
+                     "piece" = factor(c(rep(1,4), rep(2,6), rep(3,4), rep(4,4), rep(5,4), rep(6,4))),
+                     "id" = c(rep("wholecampus", 4), rep("morningsidepark", 6), rep("broadway", 4), rep("amsterdam", 4), rep("collegewalk", 4), rep("claremont", 4)),
+                     "hole" = c(rep(F,4), rep(F,6), rep(F,4), rep(F,4), rep(F,4), rep(F,4)), "order" = seq(26))
+```
+
+```{r}
+# Normalize lat/lon and add features
+crash_mat <- data.matrix(crashes.columbia[,c("latitude", "longitude",
+                                             "number_of_pedestrians_injured",
+                                             "number_of_motorist_injured",
+                                             "number_of_persons_killed", "hour")])
+
+# Standardize coordinates, bottom of campus will be about 0, 0
+for(i in seq(2)){
+  crash_mat[,i] <- scale(crash_mat[,i])
+}
+
+# Normalize injuries
+for(i in (seq(2)+2)){
+  crash_mat[,i] <- (crash_mat[,i] - min(crash_mat[,i]))/(max(crash_mat[,i]) - min(crash_mat[,i]))
+}
+
+crash_mat[,5] <- crash_mat[,5]
+
+# -1 is hours 22 - 6 (Many parking rules suspended)
+# 0 is hours 6 - 14 (Work rush hour and street sweeping hours)
+# 1 is hours 14 - 22
+
+timeofday <- numeric(length = length(crashes.columbia$hour))
+timeofday[(as.numeric(crashes.columbia$hour) > 22 | as.numeric(crashes.columbia$hour) <= 6)] <- -1
+timeofday[(as.numeric(crashes.columbia$hour) <= 22 & as.numeric(crashes.columbia$hour) >= 14)] <- 1
+```
+```{r}
+### DATA EXPLORATION ###
+
+crashes.columbia$total_injuries <- crashes.columbia$number_of_persons_injured + crashes.columbia$number_of_pedestrians_injured + crashes.columbia$number_of_cyclist_injured + crashes.columbia$number_of_motorist_injured
+
+crashes.columbia$total_killed <- crashes.columbia$number_of_persons_killed + crashes.columbia$number_of_pedestrians_killed + crashes.columbia$number_of_cyclist_killed + crashes.columbia$number_of_motorist_killed
+
+# Injuries and fatalities by day 
+by_day <- crashes.columbia %>%
+  group_by(dayofweek) %>%
+  summarise(Injuries = sum(total_injuries), Fatalities = sum(total_killed))
+
+by_day$dayofweek <- c("Mon", "Tue", "Wed", "Thur", "Fri", "Sat", "Sun")
+
+barplot(t(as.matrix(by_day[, 2:3])), 
+        beside = TRUE,
+        names.arg = by_day$dayofweek,
+        legend.text = TRUE,
+        args.legend = list(x = "topright"),
+        ylim = c(0,105),
+        ylab = "Counts",
+        xlab = "Day of Week",
+        main = "Injury & Fatality Distribution by Day of Week",
+        col=c("darkblue","red"))
+
+```
+
+```{r}
+# Injuries and fatalities by time 
+by_time <- crashes.columbia %>%
+  group_by(hour) %>%
+  summarise(Injuries = sum(total_injuries), Fatalities = sum(total_killed))
+
+by_time$hour <- as.numeric(by_time$hour)
+by_time <- by_time[order(by_time$hour),]
+
+barplot(t(as.matrix(by_time[, 2:3])), 
+        beside = TRUE,
+        names.arg = by_time$hour,
+        legend.text = TRUE,
+        args.legend = list(x = "topright"),
+        ylim = c(0,50),
+        ylab = "Counts",
+        xlab = "Time",
+        main = "Injury & Fatality Distribution by Time of Day",
+        col=c("darkblue","red"))
+```
+
+```{r}
+crash_mat[,6] <- timeofday
+
+k_max <- 20
+out <- matrix(NA, ncol=2, nrow=k_max)
+set.seed(10)
+for(k in seq_len(k_max)){
+    km_out <- kmeans(crash_mat, k)
+    out[k, 1] <- km_out$betweenss
+    out[k, 2] <- km_out$tot.withinss
+}
+
+plot(sort(out[,1]/out[, 2]), type="b",
+     main="Optimal Number of Clusters",
+     xlab="Number of Clusters, K",
+     ylab="Total Within Sum of Squares",
+     axes=FALSE)
+
+axis(1, at = seq(0, 20, by = 2),las=2)
+axis(2, at = seq(0, 15, by = 2),las=2)
+
+```
+
+If there appears to be a good jump, it won't be in the same spot when you rerun it. Let's try with seven anyways. Plus signs are centroids.
+
+
+```{r}
+fviz_nbclust(as.matrix(crash_mat), kmeans, method="wss")
+### Elbow at k=4 
+```
+
+```{r}
+k_clust <- kmeans(crash_mat, 4)
+good_fit_cos <- (k_clust$betweenss / k_clust$totss) %>% round(3)
+print(paste0("Goodness-of-Fit: ", good_fit_cos*100, "%"))
+```
+
+```{r}
+set.seed(0)
+km_out <- kmeans(crash_mat, 4)
+
+p0 <- ggplot(crashes.columbia, aes(x=longitude, y=latitude), main = "Car Accidents Near Columbia Campus") +
+  geom_polygon(color = "gray90", data=campus,
+               mapping = aes(x = long, y = lat, group = group),
+               inherit.aes = F) +
+  geom_point(aes(size=number_of_persons_injured,
+                                                 color=as.factor(km_out$cluster)), shape=1) +
+  theme(axis.text.x = element_text(angle=90, hjust=1))
+
+collat <- crashes.columbia$latitude
+collon <- crashes.columbia$longitude
+
+p1 <- p0 + geom_point(shape = 3, size = 2, data=data.frame(long=(km_out$centers[,2]*sd(collon) + mean(collon)), lat=(km_out$centers[,1]*sd(collat) + mean(collat))), mapping = aes(x = long, y = lat, color=levels(as.factor(km_out$cluster))), inherit.aes = F)
+
+p1 + annotate("text", x = -73.962, y = 40.8085, label = "CU", color = "blue", size = 6) + annotate("text", x = -73.96375, y = 40.809, label = "B", color = "blue", size = 6) + annotate("text", x = -73.96225, y = 40.8077, label = "College Walk", color = "white", size = 2, angle = -30) + annotate("text", x = -73.96425, y = 40.81, label = "Claremont", color = "black", size = 2, angle = 62) + annotate("text", x = -73.958, y = 40.8095, label = "Morningside", color = "black", size = 2, angle = 64) + annotate("text", x = -73.9655, y = 40.805, label = "Broadway", color = "black", size = 2, angle = 64) + annotate("text", x = -73.9625, y = 40.804, label = "Amsterdam", color = "black", size = 2, angle = 64)
+```
+
+
+```{r}
+table(km_out$cluster)
+
+km_out$centers
+```
+
+```{r}
+tixurls <- c("https://data.cityofnewyork.us/resource/jt7v-77mi.json?",
+             "https://data.cityofnewyork.us/resource/c284-tqph.json?",
+             "https://data.cityofnewyork.us/resource/kiv2-tbus.json?",
+             "https://data.cityofnewyork.us/resource/2bnn-yakx.json?",
+             "https://data.cityofnewyork.us/resource/a5td-mswe.json?",
+             "https://data.cityofnewyork.us/resource/faiq-9dfq.json?",
+             "https://data.cityofnewyork.us/resource/p7t3-5i9s.json?")
+
+tickets.data <- lapply(tixurls, function(x){
+  dat <- read.socrata(
+  paste(x, "$where=street_name in('CLAREMONT', 'MORNINGSIDE') or ",
+        "intersecting_street in('CLAREMONT', 'MORNINGSIDE')", sep=""),
+  app_token = ny_token,
+  email     = email_add,
+  password  = pword)
+  return (dat[,c("summons_number", "issue_date", "violation_time",
+                 "violation_code", "street_name", "intersecting_street", "violation_location")])
+  })
+
+bound <- bind_rows(tickets.data, .id = "year_batch")
+```
+
+```{r}
+tickets_df <- bound
+# Get just hour and day of week
+tickets_df$hour <- as.numeric(substr(tickets_df$violation_time, 1, 2))
+
+tickets_df$hour <- ((substr(tickets_df$violation_time, 5, 5) == 'P')*12 + tickets_df$hour)
+
+tickets_df$issue_date <- as.POSIXlt(tickets_df$issue_date)$wday
+# Label 1 or 2 for Claremont side or Morningside
+tickets_df$side <- 2
+tickets_df$side[tickets_df$street_name == "CLAREMONT"] <- 1
+tickets_df$side[tickets_df$intersecting_street == "CLAREMONT"] <- 1
+```
+
+```{r}
+# Parking tickets by day
+tickets_by_day <- tickets_df %>%
+  group_by(issue_date) %>%
+  summarise(Claremont = sum(side==1), Morningside = sum(side==2))
+
+tickets_by_day$issue_date <- c("Mon", "Tue", "Wed", "Thur", "Fri", "Sat", "Sun")
+
+barplot(t(as.matrix(tickets_by_day[, 2:3])), 
+        beside = TRUE,
+        names.arg = tickets_by_day$issue_date,
+        legend.text = TRUE,
+        args.legend = list(x = "topright"),
+        ylim = c(0,120),
+        ylab = "Counts",
+        xlab = "Day of Week",
+        main = "Parking Ticket Distribution by Day of Week",
+        col=c("darkblue","red"))
+```
+
+```{r}
+# Parking tickets by time
+tickets_by_time <- tickets_df %>%
+  group_by(hour) %>%
+  summarise(Claremont = sum(side==1), Morningside = sum(side==2))
+
+barplot(t(as.matrix(tickets_by_time[, 2:3])), 
+        beside = TRUE,
+        names.arg = tickets_by_time$hour,
+        legend.text = TRUE,
+        args.legend = list(x = "topright"),
+        ylim = c(0,100),
+        ylab = "Counts",
+        xlab = "Hour",
+        main = "Parking Ticket Distribution by Time of Day",
+        col=c("darkblue","red"))
+```
+
+
+```{r}
+barplot(table(tickets_df$hour[tickets_df$side == 1]))
+barplot(table(tickets_df$hour[tickets_df$side == 2]))
+
+barplot(table(tickets_df$issue_date[tickets_df$side == 1]))
+barplot(table(tickets_df$issue_date[tickets_df$side == 2]))
+
+daymeanCLAR <- mean(as.numeric(table(tickets_df$issue_date[tickets_df$side == 1])))
+daymeanMORN <- mean(as.numeric(table(tickets_df$issue_date[tickets_df$side == 2])))
+
+gooddayCLAR <- as.numeric(table(tickets_df$issue_date[tickets_df$side == 1])) < daymeanCLAR
+gooddayMORN <- as.numeric(table(tickets_df$issue_date[tickets_df$side == 2])) < daymeanMORN
+
+hourmeanCLAR <- mean(as.numeric(table(tickets_df$hour[tickets_df$side == 1])))
+hourmeanMORN <- mean(as.numeric(table(tickets_df$hour[tickets_df$side == 2])))
+
+goodhourCLAR <- as.numeric(table(tickets_df$hour[tickets_df$side == 1])) < hourmeanCLAR
+goodhourMORN <- as.numeric(table(tickets_df$hour[tickets_df$side == 2])) < hourmeanMORN
+
+```
+
+```{r}
+side <- apply(crashes.columbia[,c("latitude", "longitude")], 1, function(x) x[2] + 73.96125 < (15/16)*(x[1] - 40.81))
+
+tixtimeofday <- numeric(length = length(tickets_df$hour))
+tixtimeofday[(as.numeric(tickets_df$hour) > 21 | as.numeric(tickets_df$hour) < 7)] <- -1
+tixtimeofday[(as.numeric(tickets_df$hour) < 23 & as.numeric(tickets_df$hour) > 13)] <- 1
+
+parkHelp <- function(hour = 20, day = 5){
+  if (hour > 21 | hour < 7) {hour = -1}
+  else if (hour < 23 & hour > 13) {hour = 1}
+  else {hour = 0}
+  
+  print(paste(round(sum(timeofday == hour)/nrow(crash_mat)*100, 2), " percent of Columbia area accidents happen at this time of day."))
+  
+  sapply(seq(4), function(x) print(paste(round(sum(timeofday == hour & km_out$cluster == x)/sum(timeofday == hour)*100, 2), " percent of Columbia area accidents at this time of day occur in cluster ", x)))
+  
+  sapply(seq(4), function(x) print(paste(round(sum(timeofday == hour & km_out$cluster == x & crashes.columbia$number_of_persons_injured > 0)/sum(timeofday == hour & crashes.columbia$number_of_persons_injured > 0)*100, 2), " percent of Columbia area vehicle accident related injuries at this time of day occur in cluster ", x)))
+  
+  print(paste(round(sum(crashes.columbia$dayofweek == day)/nrow(crash_mat)*100, 2), " percent of Columbia area accidents happen on this day of the week."))
+  
+  sapply(seq(4), function(x) print(paste(round(sum(crashes.columbia$dayofweek == day & km_out$cluster == x)/sum(crashes.columbia$dayofweek == day)*100, 2), " percent of Columbia area accidents on this day of the week occur in cluster ", x)))
+  
+  sapply(seq(4), function(x) print(paste(round(sum(crashes.columbia$dayofweek == day & km_out$cluster == x & crashes.columbia$number_of_persons_injured > 0)/sum(crashes.columbia$dayofweek == day & crashes.columbia$number_of_persons_injured > 0)*100, 2), " percent of Columbia area vehicle accident related injuries on this day of the week occur in cluster ", x)))
+  
+  print(paste(round(sum(tickets_df$issue_date == day)/nrow(tickets_df)*100, 2), " percent of Columbia area tickets are issued on this day of the week."))
+  
+  print(paste(round(sum(tickets_df$issue_date == day & tickets_df$side == 1)/sum(tickets_df$side == 1)*100, 2), " percent of Columbia area tickets issued on Claremont side are issued on this day of the week."))
+  
+  print(paste(round(sum(tickets_df$issue_date == day & tickets_df$side == 2)/sum(tickets_df$side == 2)*100, 2), " percent of Columbia area tickets issued on Morningside are issued on this day of the week."))
+  
+  print(paste(round(sum(tixtimeofday == hour)/nrow(tickets_df)*100, 2), " percent of Columbia area tickets are issued at this time of day."))
+  
+  print(paste(round(sum(tixtimeofday == hour & tickets_df$side == 1)/sum(tickets_df$side == 1)*100, 2), " percent of Columbia area tickets issued on Claremont side are issued at this time of day."))
+  
+  print(paste(round(sum(tixtimeofday == hour & tickets_df$side == 2)/sum(tickets_df$side == 2)*100, 2), " percent of Columbia area tickets issued on Morningside are issued at this time of day."))
+  
+  return(hour)
+}
+```
+
+```{r}
+parkHelp(10,1)
+```
+
+
+
+
+
